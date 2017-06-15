@@ -1,9 +1,9 @@
 package java8;
 
-import io.reactivex.Flowable;
 import io.reactivex.Observable;
 import io.reactivex.ObservableEmitter;
-import io.reactivex.ObservableOnSubscribe;
+import io.reactivex.Observer;
+import io.reactivex.disposables.Disposable;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -13,19 +13,56 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 
-import static java.nio.file.StandardOpenOption.*;
+import static java.nio.file.StandardOpenOption.READ;
 
 public class FileIO {
 
+
+    private static Disposable subscription;
+
     public static void main(String[] args) throws IOException, InterruptedException {
-        Observable<byte[]> flowable = readFileAsync2("java/pom.xml");
-        flowable
-                .map(String::new)
-                .subscribe(s -> System.out.println("aa" + s));
+        Observable<byte[]> flowable = readFileAsync("java/pom.xml", 20);//.cache();
+        Observable<String> strings = flowable.map(String::new);
+
+//        subscription = strings.subscribe(
+//                s -> {
+//                    System.out.println("> " + s);
+//                    subscription.dispose();
+//                },
+//                e -> {
+//                    e.printStackTrace();
+//                    //System.exit(1);
+//                });
+//        //,                        () -> System.exit(0));
+
+        strings.subscribe(new Observer<String>() {
+            public Disposable subscription;
+
+            @Override
+            public void onSubscribe(Disposable d) {
+                this.subscription = d;
+            }
+
+            @Override
+            public void onNext(String s) {
+                    System.out.println("> " + s);
+                    //subscription.dispose();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                e.printStackTrace();
+            }
+
+            @Override
+            public void onComplete() {
+                System.out.println("complete");
+            }
+        });
         Thread.sleep(500000);
     }
 
-    private static Observable<String> readFileAsync() throws IOException {
+    private static Observable<String> readFileAsyncBad() throws IOException {
         List<String> strings = Files.readAllLines(Paths.get("java/pom.xml"));
         return Observable.create(e -> {
             strings.forEach(e::onNext);
@@ -34,44 +71,36 @@ public class FileIO {
     }
 
 
-    private static Observable<byte[]> readFileAsync2(String filename) throws IOException {
-        AsynchronousFileChannel channel = AsynchronousFileChannel.open(Paths.get(filename), READ);
-        ByteBuffer buffer = ByteBuffer.allocate(256);
-
-        return Observable.create(obs -> {
-            long position = 0L;
-            readChunk(channel, buffer, obs, position);
+    private static Observable<byte[]> readFileAsync(String filename, int capacity) {
+        return Observable.create(emitter -> {
+            AsynchronousFileChannel channel = AsynchronousFileChannel.open(Paths.get(filename), READ);
+            ByteBuffer buffer = ByteBuffer.allocate(capacity);
+            readChunk(channel, buffer, emitter, 0);
         });
 
     }
 
-    private static void readChunk(AsynchronousFileChannel channel, ByteBuffer buffer, ObservableEmitter<byte[]> obs, long position) {
+    private static void readChunk(AsynchronousFileChannel channel, ByteBuffer buffer, ObservableEmitter<byte[]> emitter, long position) {
         channel.read(buffer, position, buffer, new CompletionHandler<Integer, ByteBuffer>() {
             @Override
             public void completed(Integer result, ByteBuffer attachment) {
-                try {
-                    if (result > 0) {
-                        byte[] fileData = new byte[result];
-                        System.arraycopy(attachment.array(), 0, fileData, 0, result);
-                        buffer.clear();
-                        obs.onNext(fileData);
-                        //if (result == 256) {
-                            readChunk(channel, buffer, obs, position + result);
-                        //} else
-                        //    obs.onComplete();
-                    } else {
-                        obs.onComplete();
-                    }
-                } catch (Exception e) {
-                    obs.onError(e);
-                } finally {
-//                    close(channel);
+                if (emitter.isDisposed()) close(channel);
+                else if (result > 0) {
+                    byte[] fileData = new byte[result];
+                    System.out.println("read from " + position);
+                    System.arraycopy(attachment.array(), 0, fileData, 0, result);
+                    buffer.clear();
+                    emitter.onNext(fileData);
+                    readChunk(channel, buffer, emitter, position + result);
+                } else {
+                    emitter.onComplete();
+                    close(channel);
                 }
             }
 
             @Override
             public void failed(Throwable exc, ByteBuffer attachment) {
-                obs.onError(exc);
+                emitter.onError(exc);
                 close(channel);
             }
         });
